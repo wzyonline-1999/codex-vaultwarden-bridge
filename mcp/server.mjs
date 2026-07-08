@@ -31016,7 +31016,7 @@ function redactObject(value) {
   if (value && typeof value === "object") {
     const result = {};
     for (const [key, item] of Object.entries(value)) {
-      if (/password|secret|token|private|key/i.test(key)) {
+      if (/password|secret|token|private|key|session|clientid|client_id/i.test(key)) {
         result[key] = "[REDACTED]";
       } else {
         result[key] = redactObject(item);
@@ -31215,6 +31215,138 @@ function npmAlternative(tools) {
     command: "npm install -g @bitwarden/cli",
     reason: tools.npm ? "npm is available and Bitwarden publishes the CLI as @bitwarden/cli." : "Use this only after installing Node.js/npm."
   };
+}
+
+// src/keychain.ts
+var KEYCHAIN_SECRET_NAMES = [
+  "BW_SERVER",
+  "BW_CLIENTID",
+  "BW_CLIENTSECRET",
+  "BW_SESSION"
+];
+var DEFAULT_SERVICE = "codex-vaultwarden-bridge";
+function keychainService(env = process.env) {
+  return env.VAULTWARDEN_BRIDGE_KEYCHAIN_SERVICE || DEFAULT_SERVICE;
+}
+function isKeychainSupported(platform = process.platform) {
+  return platform === "darwin";
+}
+async function buildEffectiveBwEnv(env = process.env, options = {}) {
+  if (!isKeychainSupported()) {
+    return env;
+  }
+  const merged = { ...env };
+  await Promise.all(
+    KEYCHAIN_SECRET_NAMES.map(async (name) => {
+      if (merged[name]) {
+        return;
+      }
+      const value = await readKeychainSecret(name, env).catch((error51) => {
+        if (options.ignoreKeychainErrors) {
+          return void 0;
+        }
+        throw error51;
+      });
+      if (value) {
+        merged[name] = value;
+      }
+    })
+  );
+  return merged;
+}
+async function getKeychainStatus(env = process.env) {
+  const supported = isKeychainSupported();
+  const service = keychainService(env);
+  const security = supported ? await binaryStatus("security") : { available: false };
+  const secrets = await Promise.all(
+    KEYCHAIN_SECRET_NAMES.map(async (name) => {
+      if (!supported) {
+        return { name, env: env[name] ? "set" : "not set", keychain: "unsupported" };
+      }
+      if (!security.available) {
+        return { name, env: env[name] ? "set" : "not set", keychain: "unavailable" };
+      }
+      try {
+        const value = await readKeychainSecret(name, env);
+        return { name, env: env[name] ? "set" : "not set", keychain: value ? "set" : "not set" };
+      } catch {
+        return { name, env: env[name] ? "set" : "not set", keychain: "unknown" };
+      }
+    })
+  );
+  return {
+    supported,
+    service,
+    security: {
+      available: Boolean(security.available),
+      path: security.path,
+      version: security.version
+    },
+    secrets
+  };
+}
+async function readKeychainSecret(name, env = process.env) {
+  const result = await runCommand(
+    "security",
+    ["find-generic-password", "-s", keychainService(env), "-a", name, "-w"],
+    { timeoutMs: 5e3 }
+  );
+  if (result.exitCode === 0) {
+    const value = result.stdout.replace(/\r?\n$/, "");
+    return value || void 0;
+  }
+  if (isMissingKeychainItem(result)) {
+    return void 0;
+  }
+  throw new Error(`Unable to read ${name} from macOS Keychain.`);
+}
+async function saveKeychainSecrets(values, env = process.env) {
+  assertKeychainAvailable();
+  const saved = [];
+  for (const name of KEYCHAIN_SECRET_NAMES) {
+    const value = values[name];
+    if (!value) {
+      continue;
+    }
+    const result = await runCommand(
+      "security",
+      ["add-generic-password", "-U", "-s", keychainService(env), "-a", name, "-w", value],
+      { timeoutMs: 1e4 }
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`Unable to save ${name} to macOS Keychain.`);
+    }
+    saved.push(name);
+  }
+  if (!saved.length) {
+    throw new Error("No non-empty Keychain values were provided.");
+  }
+  return { service: keychainService(env), saved };
+}
+async function deleteKeychainSecret(name, env = process.env) {
+  assertKeychainAvailable();
+  const result = await runCommand(
+    "security",
+    ["delete-generic-password", "-s", keychainService(env), "-a", name],
+    { timeoutMs: 5e3 }
+  );
+  if (result.exitCode === 0) {
+    return { service: keychainService(env), deleted: name, existed: true };
+  }
+  if (isMissingKeychainItem(result)) {
+    return { service: keychainService(env), deleted: name, existed: false };
+  }
+  throw new Error(`Unable to delete ${name} from macOS Keychain.`);
+}
+function isMissingKeychainItem(result) {
+  const text = `${result.stderr}
+${result.stdout}`.toLowerCase();
+  return result.exitCode !== 0 && (text.includes("could not be found") || text.includes("the specified item could not be found") || text.includes("not found"));
+}
+function assertKeychainAvailable() {
+  if (!isKeychainSupported()) {
+    throw new Error("macOS Keychain is only available on Darwin/macOS hosts.");
+  }
 }
 
 // src/ssh.ts
@@ -31442,7 +31574,8 @@ function buildServer(env = process.env) {
   });
   const policy = loadPolicy(env);
   registerReadTool(server, "get_bridge_status", "Show bw, ssh, and ssh-agent status.", {}, async () => {
-    const bw = new BitwardenCli(env);
+    const effectiveEnv = await buildEffectiveBwEnv(env, { ignoreKeychainErrors: true });
+    const bw = new BitwardenCli(effectiveEnv);
     const [bwStatus, sshStatus, sshAddStatus] = await Promise.all([
       bw.status(),
       binaryStatus("ssh"),
@@ -31453,13 +31586,8 @@ function buildServer(env = process.env) {
       ssh: sshStatus,
       sshAdd: sshAddStatus,
       policy,
-      env: {
-        BW_SERVER: env.BW_SERVER ? "set" : "not set",
-        BW_SESSION: env.BW_SESSION ? "set" : "not set",
-        BW_CLIENTID: env.BW_CLIENTID ? "set" : "not set",
-        BW_CLIENTSECRET: env.BW_CLIENTSECRET ? "set" : "not set",
-        SSH_AUTH_SOCK: env.SSH_AUTH_SOCK ? "set" : "not set"
-      }
+      keychain: await getKeychainStatus(env),
+      environment: environmentStatus(env)
     };
   });
   registerReadTool(
@@ -31490,7 +31618,7 @@ function buildServer(env = process.env) {
     "login_with_api_key",
     {
       title: "Login with Bitwarden API key",
-      description: "Run bw login --apikey using BW_CLIENTID and BW_CLIENTSECRET from the plugin environment. Does not unlock the vault.",
+      description: "Run bw login --apikey using BW_CLIENTID and BW_CLIENTSECRET from the plugin environment or macOS Keychain. Does not unlock the vault.",
       inputSchema: {},
       annotations: {
         readOnlyHint: false,
@@ -31499,7 +31627,100 @@ function buildServer(env = process.env) {
         openWorldHint: true
       }
     },
-    async () => wrap(() => new BitwardenCli(env).loginWithApiKey())
+    async () => wrap(async () => {
+      const bwEnv = await buildEffectiveBwEnv(env);
+      return new BitwardenCli(bwEnv).loginWithApiKey();
+    })
+  );
+  server.registerTool(
+    "login_with_keychain",
+    {
+      title: "Login with Keychain Bitwarden API key",
+      description: "Load BW_SERVER, BW_CLIENTID, and BW_CLIENTSECRET from macOS Keychain when missing from the environment, configure the server when present, and run bw login --apikey.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      }
+    },
+    async () => wrap(async () => {
+      const bwEnv = await buildEffectiveBwEnv(env);
+      const bw = new BitwardenCli(bwEnv);
+      const configuredServer = bwEnv.BW_SERVER ? await bw.configureServer(bwEnv.BW_SERVER) : void 0;
+      const login = await bw.loginWithApiKey();
+      return { configuredServer, login };
+    })
+  );
+  registerReadTool(
+    server,
+    "get_keychain_status",
+    "Show whether supported Bitwarden values are present in the environment or macOS Keychain. Values are never returned.",
+    {},
+    async () => getKeychainStatus(env)
+  );
+  server.registerTool(
+    "save_bw_api_key_to_keychain",
+    {
+      title: "Save Bitwarden API key to macOS Keychain",
+      description: "Save BW_CLIENTID and BW_CLIENTSECRET, plus optional BW_SERVER, to macOS Keychain. Values are never returned.",
+      inputSchema: {
+        client_id: external_exports.string().min(1),
+        client_secret: external_exports.string().min(1),
+        server_url: external_exports.string().url().optional()
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) => wrap(
+      () => saveKeychainSecrets(
+        {
+          BW_SERVER: args.server_url,
+          BW_CLIENTID: args.client_id,
+          BW_CLIENTSECRET: args.client_secret
+        },
+        env
+      )
+    )
+  );
+  server.registerTool(
+    "save_bw_session_to_keychain",
+    {
+      title: "Save Bitwarden session to macOS Keychain",
+      description: "Save BW_SESSION to macOS Keychain after the user unlocks bw locally. The session value is never returned.",
+      inputSchema: {
+        session: external_exports.string().min(1)
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) => wrap(() => saveKeychainSecrets({ BW_SESSION: args.session }, env))
+  );
+  server.registerTool(
+    "clear_keychain_secret",
+    {
+      title: "Clear one macOS Keychain value",
+      description: "Delete one supported Bitwarden value from macOS Keychain. This does not modify Vaultwarden.",
+      inputSchema: {
+        name: external_exports.enum(KEYCHAIN_SECRET_NAMES)
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) => wrap(() => deleteKeychainSecret(args.name, env))
   );
   registerReadTool(
     server,
@@ -31510,7 +31731,7 @@ function buildServer(env = process.env) {
       include_unallowed: external_exports.boolean().optional()
     },
     async (args) => {
-      const bw = new BitwardenCli(env);
+      const bw = new BitwardenCli(await buildEffectiveBwEnv(env));
       const items = await bw.listItems(args.query);
       return items.filter((item) => args.include_unallowed || isAllowedItem(item, policy)).map((item) => summarizeItem(item, policy));
     }
@@ -31523,7 +31744,7 @@ function buildServer(env = process.env) {
       item_id: external_exports.string().min(1)
     },
     async (args) => {
-      const item = await new BitwardenCli(env).getItem(args.item_id);
+      const item = await new BitwardenCli(await buildEffectiveBwEnv(env)).getItem(args.item_id);
       return summarizeItem(item, policy);
     }
   );
@@ -31544,7 +31765,7 @@ function buildServer(env = process.env) {
       }
     },
     async (args) => wrap(async () => {
-      const item = await new BitwardenCli(env).getItem(args.item_id);
+      const item = await new BitwardenCli(await buildEffectiveBwEnv(env)).getItem(args.item_id);
       const target = extractSshTarget(item, policy);
       return addTargetToSshAgent(target, args.ttl_seconds ?? defaultTtl(env));
     })
@@ -31569,7 +31790,7 @@ function buildServer(env = process.env) {
       }
     },
     async (args) => wrap(async () => {
-      const item = await new BitwardenCli(env).getItem(args.item_id);
+      const item = await new BitwardenCli(await buildEffectiveBwEnv(env)).getItem(args.item_id);
       const target = extractSshTarget(item, policy);
       return runSshCommand(target, args.command, {
         timeoutMs: args.timeout_ms,
@@ -31587,7 +31808,7 @@ function buildServer(env = process.env) {
       command: external_exports.string().min(1)
     },
     async (args) => {
-      const item = await new BitwardenCli(env).getItem(args.item_id);
+      const item = await new BitwardenCli(await buildEffectiveBwEnv(env)).getItem(args.item_id);
       const target = extractSshTarget(item, policy);
       return {
         alias: target.alias,
@@ -31609,6 +31830,18 @@ function defaultTtl(env) {
     10
   );
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 28800;
+}
+function environmentStatus(env) {
+  return [
+    "BW_SERVER",
+    "BW_SESSION",
+    "BW_CLIENTID",
+    "BW_CLIENTSECRET",
+    "SSH_AUTH_SOCK"
+  ].map((name) => ({
+    name,
+    status: env[name] ? "set" : "not set"
+  }));
 }
 function registerReadTool(server, name, description, inputSchema, handler) {
   server.registerTool(

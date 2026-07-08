@@ -13,13 +13,16 @@ describe("redaction", () => {
       redactObject({
         name: "item",
         privateKey: "secret",
+        session: "secret",
+        clientId: "secret",
         nested: { token: "secret" }
       })
     ).toEqual({
       name: "item",
       privateKey: "[REDACTED]",
+      session: "[REDACTED]",
+      clientId: "[REDACTED]",
       nested: { token: "[REDACTED]" }
     });
   });
 });
-

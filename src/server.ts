@@ -6,6 +6,13 @@ import { z } from "zod";
 import { BitwardenCli } from "./bitwarden.js";
 import { binaryStatus } from "./cli.js";
 import { getBwInstallHint } from "./install.js";
+import {
+  buildEffectiveBwEnv,
+  deleteKeychainSecret,
+  getKeychainStatus,
+  KEYCHAIN_SECRET_NAMES,
+  saveKeychainSecrets
+} from "./keychain.js";
 import { redactObject } from "./redact.js";
 import { addTargetToSshAgent, commandConfirmation, runSshCommand } from "./ssh.js";
 import {
@@ -23,7 +30,8 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
   const policy = loadPolicy(env);
 
   registerReadTool(server, "get_bridge_status", "Show bw, ssh, and ssh-agent status.", {}, async () => {
-    const bw = new BitwardenCli(env);
+    const effectiveEnv = await buildEffectiveBwEnv(env, { ignoreKeychainErrors: true });
+    const bw = new BitwardenCli(effectiveEnv);
     const [bwStatus, sshStatus, sshAddStatus] = await Promise.all([
       bw.status(),
       binaryStatus("ssh"),
@@ -34,13 +42,8 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
       ssh: sshStatus,
       sshAdd: sshAddStatus,
       policy,
-      env: {
-        BW_SERVER: env.BW_SERVER ? "set" : "not set",
-        BW_SESSION: env.BW_SESSION ? "set" : "not set",
-        BW_CLIENTID: env.BW_CLIENTID ? "set" : "not set",
-        BW_CLIENTSECRET: env.BW_CLIENTSECRET ? "set" : "not set",
-        SSH_AUTH_SOCK: env.SSH_AUTH_SOCK ? "set" : "not set"
-      }
+      keychain: await getKeychainStatus(env),
+      environment: environmentStatus(env)
     };
   });
 
@@ -75,7 +78,7 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
     {
       title: "Login with Bitwarden API key",
       description:
-        "Run bw login --apikey using BW_CLIENTID and BW_CLIENTSECRET from the plugin environment. Does not unlock the vault.",
+        "Run bw login --apikey using BW_CLIENTID and BW_CLIENTSECRET from the plugin environment or macOS Keychain. Does not unlock the vault.",
       inputSchema: {},
       annotations: {
         readOnlyHint: false,
@@ -84,7 +87,114 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
         openWorldHint: true
       }
     },
-    async () => wrap(() => new BitwardenCli(env).loginWithApiKey())
+    async () =>
+      wrap(async () => {
+        const bwEnv = await buildEffectiveBwEnv(env);
+        return new BitwardenCli(bwEnv).loginWithApiKey();
+      })
+  );
+
+  server.registerTool(
+    "login_with_keychain",
+    {
+      title: "Login with Keychain Bitwarden API key",
+      description:
+        "Load BW_SERVER, BW_CLIENTID, and BW_CLIENTSECRET from macOS Keychain when missing from the environment, configure the server when present, and run bw login --apikey.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      }
+    },
+    async () =>
+      wrap(async () => {
+        const bwEnv = await buildEffectiveBwEnv(env);
+        const bw = new BitwardenCli(bwEnv);
+        const configuredServer = bwEnv.BW_SERVER
+          ? await bw.configureServer(bwEnv.BW_SERVER)
+          : undefined;
+        const login = await bw.loginWithApiKey();
+        return { configuredServer, login };
+      })
+  );
+
+  registerReadTool(
+    server,
+    "get_keychain_status",
+    "Show whether supported Bitwarden values are present in the environment or macOS Keychain. Values are never returned.",
+    {},
+    async () => getKeychainStatus(env)
+  );
+
+  server.registerTool(
+    "save_bw_api_key_to_keychain",
+    {
+      title: "Save Bitwarden API key to macOS Keychain",
+      description:
+        "Save BW_CLIENTID and BW_CLIENTSECRET, plus optional BW_SERVER, to macOS Keychain. Values are never returned.",
+      inputSchema: {
+        client_id: z.string().min(1),
+        client_secret: z.string().min(1),
+        server_url: z.string().url().optional()
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) =>
+      wrap(() =>
+        saveKeychainSecrets(
+          {
+            BW_SERVER: args.server_url,
+            BW_CLIENTID: args.client_id,
+            BW_CLIENTSECRET: args.client_secret
+          },
+          env
+        )
+      )
+  );
+
+  server.registerTool(
+    "save_bw_session_to_keychain",
+    {
+      title: "Save Bitwarden session to macOS Keychain",
+      description:
+        "Save BW_SESSION to macOS Keychain after the user unlocks bw locally. The session value is never returned.",
+      inputSchema: {
+        session: z.string().min(1)
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) => wrap(() => saveKeychainSecrets({ BW_SESSION: args.session }, env))
+  );
+
+  server.registerTool(
+    "clear_keychain_secret",
+    {
+      title: "Clear one macOS Keychain value",
+      description:
+        "Delete one supported Bitwarden value from macOS Keychain. This does not modify Vaultwarden.",
+      inputSchema: {
+        name: z.enum(KEYCHAIN_SECRET_NAMES)
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) => wrap(() => deleteKeychainSecret(args.name, env))
   );
 
   registerReadTool(
@@ -96,7 +206,7 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
       include_unallowed: z.boolean().optional()
     },
     async (args) => {
-      const bw = new BitwardenCli(env);
+      const bw = new BitwardenCli(await buildEffectiveBwEnv(env));
       const items = await bw.listItems(args.query);
       return items
         .filter((item) => args.include_unallowed || isAllowedItem(item, policy))
@@ -112,7 +222,7 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
       item_id: z.string().min(1)
     },
     async (args) => {
-      const item = await new BitwardenCli(env).getItem(args.item_id);
+      const item = await new BitwardenCli(await buildEffectiveBwEnv(env)).getItem(args.item_id);
       return summarizeItem(item, policy);
     }
   );
@@ -136,7 +246,7 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
     },
     async (args) =>
       wrap(async () => {
-        const item = await new BitwardenCli(env).getItem(args.item_id);
+        const item = await new BitwardenCli(await buildEffectiveBwEnv(env)).getItem(args.item_id);
         const target = extractSshTarget(item, policy);
         return addTargetToSshAgent(target, args.ttl_seconds ?? defaultTtl(env));
       })
@@ -164,7 +274,7 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
     },
     async (args) =>
       wrap(async () => {
-        const item = await new BitwardenCli(env).getItem(args.item_id);
+        const item = await new BitwardenCli(await buildEffectiveBwEnv(env)).getItem(args.item_id);
         const target = extractSshTarget(item, policy);
         return runSshCommand(target, args.command, {
           timeoutMs: args.timeout_ms,
@@ -183,7 +293,7 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
       command: z.string().min(1)
     },
     async (args) => {
-      const item = await new BitwardenCli(env).getItem(args.item_id);
+      const item = await new BitwardenCli(await buildEffectiveBwEnv(env)).getItem(args.item_id);
       const target = extractSshTarget(item, policy);
       return {
         alias: target.alias,
@@ -208,6 +318,19 @@ function defaultTtl(env: NodeJS.ProcessEnv): number {
     10
   );
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 28800;
+}
+
+function environmentStatus(env: NodeJS.ProcessEnv): Array<{ name: string; status: "set" | "not set" }> {
+  return [
+    "BW_SERVER",
+    "BW_SESSION",
+    "BW_CLIENTID",
+    "BW_CLIENTSECRET",
+    "SSH_AUTH_SOCK"
+  ].map((name) => ({
+    name,
+    status: env[name] ? "set" : "not set"
+  }));
 }
 
 function registerReadTool<TArgs extends Record<string, z.ZodTypeAny>>(

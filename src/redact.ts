@@ -19,7 +19,7 @@ export function redactObject<T>(value: T): T {
   if (value && typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
-      if (/password|secret|token|private|key/i.test(key)) {
+      if (/password|secret|token|private|key|session|clientid|client_id/i.test(key)) {
         result[key] = "[REDACTED]";
       } else {
         result[key] = redactObject(item);
@@ -29,4 +29,3 @@ export function redactObject<T>(value: T): T {
   }
   return value;
 }
-

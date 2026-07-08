@@ -7,6 +7,7 @@ The bridge wraps the `bw` CLI and exposes a small MCP server for safe workflows:
 - inspect Bitwarden CLI status
 - get OS-aware `bw` CLI installation guidance
 - configure the Vaultwarden server URL
+- store Bitwarden CLI API credentials and sessions in macOS Keychain
 - search vault items by title and return redacted summaries
 - add an SSH key from Vaultwarden to `ssh-agent` with a TTL
 - run SSH commands from a tagged vault item
@@ -19,6 +20,8 @@ Vaultwarden remains the source of truth. This plugin does not store your master 
 Secret handling defaults:
 
 - vault item summaries never include secret values
+- environment variables take priority over macOS Keychain values
+- macOS Keychain values are looked up only for `BW_SERVER`, `BW_CLIENTID`, `BW_CLIENTSECRET`, and `BW_SESSION`
 - SSH private keys are written only to `0600` temporary files
 - `ssh_agent_add` deletes the temporary private key after adding it to `ssh-agent`
 - `run_ssh` deletes the temporary private key after the command completes
@@ -67,6 +70,20 @@ export BW_SESSION="..."
 
 The plugin intentionally does not bundle the `bw` binary. Use `get_bw_install_hint` to detect the current OS and get the recommended install command.
 
+On macOS, you can save Bitwarden CLI values to Keychain instead of keeping them in `.mcp.json`:
+
+```text
+save_bw_api_key_to_keychain(
+  client_id: "...",
+  client_secret: "...",
+  server_url: "https://vault.example.com"
+)
+
+save_bw_session_to_keychain(session: "...")
+```
+
+Then `login_with_keychain` and the vault lookup tools can use those values automatically when the matching environment variables are not set.
+
 For repeated SSH access, prefer agent TTLs:
 
 ```text
@@ -98,7 +115,12 @@ The MCP server config is in `.mcp.json`:
 | `get_bridge_status` | Show `bw`, `ssh`, and `ssh-add` status without secrets |
 | `get_bw_install_hint` | Show OS-aware `bw` install guidance without installing software |
 | `configure_bw_server` | Run `bw config server <url>` |
-| `login_with_api_key` | Run `bw login --apikey` using environment variables |
+| `login_with_api_key` | Run `bw login --apikey` using environment variables or Keychain |
+| `login_with_keychain` | Load Keychain values, configure `BW_SERVER` when present, and run `bw login --apikey` |
+| `get_keychain_status` | Show which supported values exist in env or Keychain without returning values |
+| `save_bw_api_key_to_keychain` | Save `BW_CLIENTID`, `BW_CLIENTSECRET`, and optional `BW_SERVER` to macOS Keychain |
+| `save_bw_session_to_keychain` | Save `BW_SESSION` to macOS Keychain |
+| `clear_keychain_secret` | Delete one supported value from macOS Keychain |
 | `search_items` | Search vault item titles and return redacted summaries |
 | `get_item_summary` | Return a redacted summary for one item |
 | `ssh_agent_add` | Add an SSH key item to `ssh-agent` with a TTL |
@@ -113,6 +135,7 @@ The MCP server config is in `.mcp.json`:
 | `BW_SESSION` | unset | Bitwarden CLI unlock session |
 | `BW_CLIENTID` | unset | Bitwarden API key client id |
 | `BW_CLIENTSECRET` | unset | Bitwarden API key client secret |
+| `VAULTWARDEN_BRIDGE_KEYCHAIN_SERVICE` | `codex-vaultwarden-bridge` | macOS Keychain service name |
 | `VAULTWARDEN_BRIDGE_ALLOWED_TAG` | `codex:ssh` | Required tag for secret-bearing item use |
 | `VAULTWARDEN_BRIDGE_REQUIRE_TAG` | `true` | Set `false` to allow untagged items |
 | `VAULTWARDEN_BRIDGE_DEFAULT_SSH_TTL_SECONDS` | `28800` | Default ssh-agent TTL |
