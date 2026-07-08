@@ -1,0 +1,30 @@
+{
+  "name": "codex-vaultwarden-bridge",
+  "version": "0.1.0",
+  "description": "A local Codex plugin for safely using Vaultwarden and Bitwarden CLI credentials.",
+  "author": {
+    "name": "wzyonline-1999",
+    "url": "https://github.com/wzyonline-1999"
+  },
+  "homepage": "https://github.com/wzyonline-1999/codex-vaultwarden-bridge",
+  "repository": "https://github.com/wzyonline-1999/codex-vaultwarden-bridge",
+  "license": "MIT",
+  "keywords": ["codex", "vaultwarden", "bitwarden", "mcp", "ssh", "secrets"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Vaultwarden Bridge",
+    "shortDescription": "Use Vaultwarden secrets from Codex without printing them.",
+    "longDescription": "Vaultwarden Bridge is a local Codex plugin that wraps the Bitwarden CLI, summarizes vault items, prepares temporary SSH keys, adds keys to ssh-agent with a TTL, and runs SSH commands without exposing private keys in chat.",
+    "developerName": "wzyonline-1999",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://github.com/wzyonline-1999/codex-vaultwarden-bridge",
+    "defaultPrompt": [
+      "Check my Vaultwarden CLI status.",
+      "Search vault items tagged for Codex SSH.",
+      "Run a safe SSH status command by server alias."
+    ],
+    "brandColor": "#175DDC"
+  },
+  "mcpServers": "./.mcp.json"
+}
