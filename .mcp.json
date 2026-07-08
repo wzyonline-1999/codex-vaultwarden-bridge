@@ -8,7 +8,6 @@
       "cwd": ".",
       "tool_timeout_sec": 120,
       "env": {
-        "BW_SERVER": "https://vault.example.com",
         "VAULTWARDEN_BRIDGE_KEYCHAIN_SERVICE": "codex-vaultwarden-bridge",
         "VAULTWARDEN_BRIDGE_ALLOWED_TAG": "codex:ssh",
         "VAULTWARDEN_BRIDGE_REQUIRE_TAG": "true",
