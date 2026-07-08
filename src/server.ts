@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { BitwardenCli } from "./bitwarden.js";
 import { binaryStatus } from "./cli.js";
+import { getBwInstallHint } from "./install.js";
 import { redactObject } from "./redact.js";
 import { addTargetToSshAgent, commandConfirmation, runSshCommand } from "./ssh.js";
 import {
@@ -42,6 +43,14 @@ export function buildServer(env: NodeJS.ProcessEnv = process.env): McpServer {
       }
     };
   });
+
+  registerReadTool(
+    server,
+    "get_bw_install_hint",
+    "Return OS-aware Bitwarden CLI installation guidance. This tool never installs software.",
+    {},
+    async () => getBwInstallHint()
+  );
 
   server.registerTool(
     "configure_bw_server",
@@ -263,4 +272,3 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(1);
   });
 }
-

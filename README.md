@@ -5,6 +5,7 @@ A local Codex plugin that lets Codex use credentials stored in Vaultwarden or Bi
 The bridge wraps the `bw` CLI and exposes a small MCP server for safe workflows:
 
 - inspect Bitwarden CLI status
+- get OS-aware `bw` CLI installation guidance
 - configure the Vaultwarden server URL
 - search vault items by title and return redacted summaries
 - add an SSH key from Vaultwarden to `ssh-agent` with a TTL
@@ -52,11 +53,19 @@ npm run build
 Install and configure Bitwarden CLI:
 
 ```bash
+# macOS with Homebrew
+brew install bitwarden-cli
+
+# Cross-platform npm fallback
+npm install -g @bitwarden/cli
+
 bw config server https://vault.example.com
 bw login --apikey
 bw unlock
 export BW_SESSION="..."
 ```
+
+The plugin intentionally does not bundle the `bw` binary. Use `get_bw_install_hint` to detect the current OS and get the recommended install command.
 
 For repeated SSH access, prefer agent TTLs:
 
@@ -87,6 +96,7 @@ The MCP server config is in `.mcp.json`:
 | Tool | Purpose |
 | --- | --- |
 | `get_bridge_status` | Show `bw`, `ssh`, and `ssh-add` status without secrets |
+| `get_bw_install_hint` | Show OS-aware `bw` install guidance without installing software |
 | `configure_bw_server` | Run `bw config server <url>` |
 | `login_with_api_key` | Run `bw login --apikey` using environment variables |
 | `search_items` | Search vault item titles and return redacted summaries |
@@ -119,4 +129,3 @@ npm run verify
 ## License
 
 MIT
-
